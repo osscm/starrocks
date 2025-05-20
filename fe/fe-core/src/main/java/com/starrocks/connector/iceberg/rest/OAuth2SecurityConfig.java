@@ -124,6 +124,10 @@ class OAuth2SecurityConfigBuilder {
     public static OAuth2SecurityConfig build(final Map<String, String> properties) {
         String strSecurity = properties.get(OAuth2SecurityConfig.SECURITY);
 
+        if (strSecurity == null) {
+            strSecurity = IcebergRESTCatalog.Security.NONE.name();
+        }
+
         if (strSecurity.equals(IcebergRESTCatalog.Security.NONE.name())) {
             return new OAuth2SecurityConfig();
         } else if (strSecurity.equals(IcebergRESTCatalog.Security.OIDC.name())) {
