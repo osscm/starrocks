@@ -26,6 +26,7 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider;
 import software.amazon.awssdk.profiles.ProfileFile;
 import software.amazon.awssdk.profiles.ProfileFileSystemSetting;
 import software.amazon.awssdk.regions.Region;
@@ -58,6 +59,7 @@ import static com.starrocks.connector.share.credential.CloudConfigurationConstan
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_GLUE_STS_REGION;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_GLUE_USE_AWS_SDK_DEFAULT_BEHAVIOR;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_GLUE_USE_INSTANCE_PROFILE;
+import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_GLUE_USE_WEBIDENTITY_PROFILE;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_ACCESS_KEY;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_ENABLE_PATH_STYLE_ACCESS;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_ENDPOINT;
@@ -70,6 +72,7 @@ import static com.starrocks.connector.share.credential.CloudConfigurationConstan
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_STS_REGION;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_USE_AWS_SDK_DEFAULT_BEHAVIOR;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_USE_INSTANCE_PROFILE;
+import static com.starrocks.connector.share.credential.CloudConfigurationConstants.AWS_S3_USE_WEIDENTITY_PROFILE;
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.DEFAULT_AWS_REGION;
 
 public class IcebergAwsClientFactory implements AwsClientFactory {
@@ -80,6 +83,7 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
 
     private boolean s3UseAWSSDKDefaultBehavior;
     private boolean s3UseInstanceProfile;
+    private boolean s3UseWebIdentityProfile;
     private String s3AccessKey;
     private String s3SecretKey;
     private String s3SessionToken;
@@ -92,6 +96,7 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
     private boolean s3EnablePathStyleAccess;
     private boolean glueUseAWSSDKDefaultBehavior;
     private boolean glueUseInstanceProfile;
+    private boolean glueUseWebIdentityProfile;
     private String glueAccessKey;
     private String glueSecretKey;
     private String glueSessionToken;
@@ -108,6 +113,7 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
 
         s3UseAWSSDKDefaultBehavior = Boolean.parseBoolean(properties.getOrDefault(AWS_S3_USE_AWS_SDK_DEFAULT_BEHAVIOR, "false"));
         s3UseInstanceProfile = Boolean.parseBoolean(properties.getOrDefault(AWS_S3_USE_INSTANCE_PROFILE, "false"));
+        s3UseWebIdentityProfile = Boolean.parseBoolean(properties.getOrDefault(AWS_S3_USE_WEIDENTITY_PROFILE, "false"));
         s3AccessKey = properties.getOrDefault(S3FileIOProperties.ACCESS_KEY_ID,
                 properties.getOrDefault(AWS_S3_ACCESS_KEY, ""));
         s3SecretKey = properties.getOrDefault(S3FileIOProperties.SECRET_ACCESS_KEY,
@@ -127,6 +133,7 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
         glueUseAWSSDKDefaultBehavior = Boolean.parseBoolean(
                 properties.getOrDefault(AWS_GLUE_USE_AWS_SDK_DEFAULT_BEHAVIOR, "false"));
         glueUseInstanceProfile = Boolean.parseBoolean(properties.getOrDefault(AWS_GLUE_USE_INSTANCE_PROFILE, "false"));
+        glueUseWebIdentityProfile = Boolean.parseBoolean(properties.getOrDefault(AWS_GLUE_USE_WEBIDENTITY_PROFILE, "false"));
         glueAccessKey = properties.getOrDefault(AWS_GLUE_ACCESS_KEY, "");
         glueSecretKey = properties.getOrDefault(AWS_GLUE_SECRET_KEY, "");
         glueSessionToken = properties.getOrDefault(AWS_GLUE_SESSION_TOKEN, "");
@@ -174,8 +181,8 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
     @Override
     public S3Client s3() {
         AwsCredentialsProvider baseAWSCredentialsProvider =
-                getBaseAWSCredentialsProvider(s3UseAWSSDKDefaultBehavior, s3UseInstanceProfile, s3AccessKey,
-                        s3SecretKey, s3SessionToken);
+                getBaseAWSCredentialsProvider(s3UseAWSSDKDefaultBehavior, s3UseInstanceProfile, s3UseWebIdentityProfile,
+                        s3AccessKey, s3SecretKey, s3SessionToken);
         S3ClientBuilder s3ClientBuilder = S3Client.builder();
 
         if (!s3IamRoleArn.isEmpty()) {
@@ -201,10 +208,39 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
     }
 
     @Override
+    public S3AsyncClient s3Async() {
+        AwsCredentialsProvider baseAWSCredentialsProvider =
+                getBaseAWSCredentialsProvider(s3UseAWSSDKDefaultBehavior, s3UseInstanceProfile, s3UseWebIdentityProfile,
+                        s3AccessKey, s3SecretKey, s3SessionToken);
+        S3AsyncClientBuilder s3AsyncClientBuilder = S3AsyncClient.builder();
+
+        if (!s3IamRoleArn.isEmpty()) {
+            s3AsyncClientBuilder.credentialsProvider(getAssumeRoleCredentialsProvider(baseAWSCredentialsProvider,
+                    s3IamRoleArn, s3ExternalId, s3StsRegion, s3StsEndpoint));
+        } else {
+            s3AsyncClientBuilder.credentialsProvider(baseAWSCredentialsProvider);
+        }
+
+        s3AsyncClientBuilder.region(tryToResolveRegion(s3Region));
+
+        // To prevent the 's3AsyncClientBuilder' (NPE) exception, when 'aws.s3.endpoint' does not have
+        // 'scheme', we will add https scheme.
+        if (!s3Endpoint.isEmpty()) {
+            s3AsyncClientBuilder.endpointOverride(ensureSchemeInEndpoint(s3Endpoint));
+        }
+
+        // set for s3 path style access
+        s3AsyncClientBuilder.serviceConfiguration(
+                S3Configuration.builder().pathStyleAccessEnabled(s3EnablePathStyleAccess).build());
+
+        return s3AsyncClientBuilder.build();
+    }
+
+    @Override
     public GlueClient glue() {
         AwsCredentialsProvider baseAWSCredentialsProvider =
-                getBaseAWSCredentialsProvider(glueUseAWSSDKDefaultBehavior, glueUseInstanceProfile, glueAccessKey,
-                        glueSecretKey, glueSessionToken);
+                getBaseAWSCredentialsProvider(glueUseAWSSDKDefaultBehavior, glueUseInstanceProfile,
+                        glueUseWebIdentityProfile, glueAccessKey, glueSecretKey, glueSessionToken);
         GlueClientBuilder glueClientBuilder = GlueClient.builder();
 
         if (!glueIamRoleArn.isEmpty()) {
@@ -226,11 +262,16 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
     }
 
     private AwsCredentialsProvider getBaseAWSCredentialsProvider(boolean useAWSSDKDefaultBehavior, boolean useInstanceProfile,
-                                                                 String accessKey, String secretKey, String sessionToken) {
+                                                                 boolean useWebIdentityProfile, String accessKey,
+                                                                 String secretKey, String sessionToken) {
         if (useAWSSDKDefaultBehavior) {
             return DefaultCredentialsProvider.builder().build();
         } else if (useInstanceProfile) {
             return InstanceProfileCredentialsProvider.builder().build();
+        } else if (useWebIdentityProfile) {
+            return WebIdentityTokenFileCredentialsProvider.builder()
+                    .asyncCredentialUpdateEnabled(true)
+                    .build();
         } else if (!accessKey.isEmpty() && !secretKey.isEmpty()) {
             if (!sessionToken.isEmpty()) {
                 return StaticCredentialsProvider.create(AwsSessionCredentials.create(accessKey, secretKey, sessionToken));
